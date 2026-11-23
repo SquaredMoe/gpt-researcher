@@ -1,11 +1,26 @@
 import os
-import requests
 import tempfile
-from urllib.parse import urlparse
-from langchain_community.document_loaders import PyMuPDFLoader
+from urllib.parse import unquote, urlparse
+
+import requests
+
+from gpt_researcher.document.pdf_loader import PDFLoader
 
 
-class PyMuPDFScraper:
+def _fallback_title(link: str) -> str:
+    """Derive a readable title fallback from a URL or file path when PDF metadata lacks a title."""
+    try:
+        parsed = urlparse(link)
+        raw_name = os.path.basename(parsed.path or link)
+        name = unquote(raw_name)
+        stem = os.path.splitext(name)[0].replace("_", " ").replace("-", " ")
+        cleaned = " ".join(stem.split())
+        return cleaned or parsed.netloc or link
+    except (ValueError, TypeError, AttributeError):
+        return link
+
+
+class PDFScraper:
 
     def __init__(self, link, session=None):
         """
@@ -33,7 +48,7 @@ class PyMuPDFScraper:
 
     def scrape(self) -> tuple[str, list[str], str]:
         """
-        The `scrape` function uses PyMuPDFLoader to load a document from the provided link (either URL or local file)
+        The `scrape` function uses PDFLoader to load a document from the provided link (either URL or local file)
         and returns the document as a string.
 
         Returns:
@@ -59,9 +74,9 @@ class PyMuPDFScraper:
                         temp_file.write(chunk)  # Write the downloaded content to the temporary file
 
                 # Always clean up the downloaded temp file, even if loading fails
-                # (PyMuPDFLoader.load() can raise on a malformed/partial PDF).
+                # (PDFLoader.load() can raise on a malformed/partial PDF).
                 try:
-                    loader = PyMuPDFLoader(temp_filename)
+                    loader = PDFLoader(temp_filename)
                     doc = loader.load()
                 finally:
                     try:
@@ -69,14 +84,16 @@ class PyMuPDFScraper:
                     except OSError:
                         pass
             else:
-                loader = PyMuPDFLoader(self.link)
+                loader = PDFLoader(self.link)
                 doc = loader.load()
 
             # Extract the content, image (if any), and title from the document.
             image = []
             # Retrieve content from ALL pages to ensure PDFs with cover pages pass validation.
             content = "\n".join(page.page_content for page in doc)
-            title = doc[0].metadata.get("title", "") if doc else ""
+            title = (doc[0].metadata.get("title") or "").strip() if doc else ""
+            if doc and not title:
+                title = _fallback_title(self.link)
             return content, image, title
 
         except requests.exceptions.Timeout:

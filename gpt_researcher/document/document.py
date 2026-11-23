@@ -2,7 +2,6 @@ import asyncio
 import os
 from typing import List, Union
 from langchain_community.document_loaders import (
-    PyMuPDFLoader,
     TextLoader,
     UnstructuredCSVLoader,
 UnstructuredEPubLoader,
@@ -12,6 +11,8 @@ UnstructuredEPubLoader,
     UnstructuredWordDocumentLoader
 )
 from langchain_community.document_loaders import BSHTMLLoader
+
+from gpt_researcher.document.pdf_loader import PDFLoader
 
 
 def detect_utf8(file_path: str) -> str | None:
@@ -36,31 +37,29 @@ class DocumentLoader:
 
     async def load(self) -> list:
         tasks = []
+
+        def add_file(file_path_str: str):
+            filename = os.path.basename(file_path_str)
+            _, ext_with_dot = os.path.splitext(filename)
+            file_extension = ext_with_dot.strip(".").lower()
+            tasks.append(self._load_document(file_path_str, file_extension))
+
+        def add_path(p: Union[str, bytes, os.PathLike]):
+            p_str = os.fspath(p) if not isinstance(p, bytes) else os.fsdecode(p)
+            if os.path.isfile(p_str):
+                add_file(p_str)
+            elif os.path.isdir(p_str):
+                for root, _, files in os.walk(p_str):
+                    for file in files:
+                        add_file(os.path.join(root, file))
+
         if isinstance(self.path, list):
-            for file_path in self.path:
-                if os.path.isfile(file_path):  # Ensure it's a valid file
-                    filename = os.path.basename(file_path)
-                    file_name, file_extension_with_dot = os.path.splitext(filename)
-                    file_extension = file_extension_with_dot.strip(".").lower()
-                    tasks.append(self._load_document(file_path, file_extension))
-                    
+            for item in self.path:
+                add_path(item)
         elif isinstance(self.path, (str, bytes, os.PathLike)):
-            for root, dirs, files in os.walk(self.path):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    file_name, file_extension_with_dot = os.path.splitext(file)
-                    file_extension = file_extension_with_dot.strip(".").lower()
-                    tasks.append(self._load_document(file_path, file_extension))
-                    
+            add_path(self.path)
         else:
             raise ValueError("Invalid type for path. Expected str, bytes, os.PathLike, or list thereof.")
-
-        # for root, dirs, files in os.walk(self.path):
-        #     for file in files:
-        #         file_path = os.path.join(root, file)
-        #         file_name, file_extension_with_dot = os.path.splitext(file_path)
-        #         file_extension = file_extension_with_dot.strip(".")
-        #         tasks.append(self._load_document(file_path, file_extension))
 
         docs = []
         for pages in await asyncio.gather(*tasks):
@@ -86,7 +85,7 @@ class DocumentLoader:
         try:
             encoding = detect_utf8(file_path) if file_extension in ("txt", "html", "htm") else None
             loader_dict = {
-                "pdf": PyMuPDFLoader(file_path),
+                "pdf": PDFLoader(file_path),
 "epub": UnstructuredEPubLoader(file_path),
                 "txt": TextLoader(file_path, encoding=encoding),
                 "doc": UnstructuredWordDocumentLoader(file_path),

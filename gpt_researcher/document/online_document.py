@@ -1,12 +1,12 @@
 import os
 import aiohttp
 import tempfile
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from gpt_researcher.document.document import detect_utf8
+from gpt_researcher.document.pdf_loader import PDFLoader
 from gpt_researcher.utils.url_security import UnsafeURLError, validate_url
 from langchain_community.document_loaders import (
-    PyMuPDFLoader,
     TextLoader,
     UnstructuredCSVLoader,
     UnstructuredExcelLoader,
@@ -55,17 +55,34 @@ class OnlineDocumentLoader:
                 "User-Agent": "Mozilla/5.0"
             }
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=6) as response:
-                    if response.status != 200:
-                        print(f"Failed to download {url}: HTTP {response.status}")
-                        return []
+                current_url = url
+                for redirects in range(6):
+                    async with session.get(current_url, headers=headers, timeout=6, allow_redirects=False) as response:
+                        if response.status in (301, 302, 303, 307, 308) and "Location" in response.headers:
+                            if redirects == 5:
+                                print(f"Too many redirects downloading {url}")
+                                return []
+                            current_url = urljoin(current_url, response.headers["Location"])
+                            validate_url(current_url)
+                            continue
+                        if response.status != 200:
+                            print(f"Failed to download {url}: HTTP {response.status}")
+                            return []
 
-                    content = await response.read()
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=self._get_extension(url)) as tmp_file:
-                        tmp_file.write(content)
-                        tmp_file_path = tmp_file.name
+                        content = await response.read()
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=self._get_extension(url)) as tmp_file:
+                            tmp_file.write(content)
+                            tmp_file_path = tmp_file.name
 
-                    return await self._load_document(tmp_file_path, self._get_extension(url).strip('.'))
+                        pages = await self._load_document(tmp_file_path, self._get_extension(url).strip('.'))
+                        for page in pages:
+                            meta = getattr(page, "metadata", None)
+                            if isinstance(meta, dict):
+                                meta["source"] = url
+                        return pages
+        except UnsafeURLError as e:
+            print(f"Skipping document {url}: unsafe redirect: {e}")
+            return []
         except aiohttp.ClientError as e:
             print(f"Failed to process {url}")
             print(e)
@@ -80,7 +97,7 @@ class OnlineDocumentLoader:
         try:
             encoding = detect_utf8(file_path) if file_extension == "txt" else None
             loader_dict = {
-                "pdf": PyMuPDFLoader(file_path),
+                "pdf": PDFLoader(file_path),
                 "txt": TextLoader(file_path, encoding=encoding),
                 "doc": UnstructuredWordDocumentLoader(file_path),
                 "docx": UnstructuredWordDocumentLoader(file_path),
